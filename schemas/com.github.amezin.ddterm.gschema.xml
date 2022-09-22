@@ -37,6 +37,27 @@
     <value nick="never" value="2"/>
   </enum>
 
+  <enum id="com.github.amezin.ddterm.TabPosition">
+    <value nick="left" value="0"/>
+    <value nick="right" value="1"/>
+    <value nick="top" value="2"/>
+    <value nick="bottom" value="3"/>
+  </enum>
+
+  <enum id="com.github.amezin.ddterm.WindowPosition">
+    <value nick="top" value="0"/>
+    <value nick="bottom" value="1"/>
+    <value nick="left" value="2"/>
+    <value nick="right" value="3"/>
+  </enum>
+
+  <enum id="com.github.amezin.ddterm.WindowMonitor">
+    <value nick="current" value="0"/>
+    <value nick="primary" value="1"/>
+    <value nick="focus" value="2"/>
+    <value nick="connector" value="3"/>
+  </enum>
+
   <enum id="com.github.amezin.ddterm.EraseBinding">
     <value nick="auto" value="0"/>
     <value nick="ascii-backspace" value="1"/>
@@ -65,12 +86,85 @@
     <value nick="combo" value="12"/>
   </enum>
 
+  <enum id="com.github.amezin.ddterm.AnimationMode">
+    <value nick="disable" value="0"/>
+
+    <value nick="linear" value="1"/>
+
+    <value nick="ease-in-quad" value="2"/>
+    <value nick="ease-out-quad" value="3"/>
+    <value nick="ease-in-out-quad" value="4"/>
+
+    <value nick="ease-in-cubic" value="5"/>
+    <value nick="ease-out-cubic" value="6"/>
+    <value nick="ease-in-out-cubic" value="7"/>
+
+    <value nick="ease-in-quart" value="8"/>
+    <value nick="ease-out-quart" value="9"/>
+    <value nick="ease-in-out-quart" value="10"/>
+
+    <value nick="ease-in-quint" value="11"/>
+    <value nick="ease-out-quint" value="12"/>
+    <value nick="ease-in-out-quint" value="13"/>
+
+    <value nick="ease-in-sine" value="14"/>
+    <value nick="ease-out-sine" value="15"/>
+    <value nick="ease-in-out-sine" value="16"/>
+
+    <value nick="ease-in-expo" value="17"/>
+    <value nick="ease-out-expo" value="18"/>
+    <value nick="ease-in-out-expo" value="19"/>
+
+    <value nick="ease-in-circ" value="20"/>
+    <value nick="ease-out-circ" value="21"/>
+    <value nick="ease-in-out-circ" value="22"/>
+
+    <value nick="ease-in-elastic" value="23"/>
+    <value nick="ease-out-elastic" value="24"/>
+    <value nick="ease-in-out-elastic" value="25"/>
+
+    <value nick="ease-in-back" value="26"/>
+    <value nick="ease-out-back" value="27"/>
+    <value nick="ease-in-out-back" value="28"/>
+
+    <value nick="ease-in-bounce" value="29"/>
+    <value nick="ease-out-bounce" value="30"/>
+    <value nick="ease-in-out-bounce" value="31"/>
+  </enum>
+
+  <enum id="com.github.amezin.ddterm.PanelIconType">
+    <value nick="none" value="0"/>
+    <value nick="menu-button" value="1"/>
+    <value nick="toggle-button" value="2"/>
+  </enum>
+
+  <enum id="com.github.amezin.ddterm.EllipsizeMode">
+    <value nick="none" value="0"/>
+    <value nick="start" value="1"/>
+    <value nick="middle" value="2"/>
+    <value nick="end" value="3"/>
+  </enum>
+
   <schema path="/com/github/amezin/ddterm/" id="com.github.amezin.ddterm">
-    <key name="window-height" type="d">
+    <key name="window-size" type="d">
       <default>0.6</default>
       <range min="0.0" max="1.0"/>
     </key>
-
+    <key name="window-maximize" type="b">
+      <default>false</default>
+    </key>
+    <key name="window-position" enum="com.github.amezin.ddterm.WindowPosition">
+      <default>'top'</default>
+    </key>
+    <key name="window-monitor" enum="com.github.amezin.ddterm.WindowMonitor">
+      <default>'current'</default>
+    </key>
+    <key name="window-monitor-connector" type="s">
+      <default>''</default>
+    </key>
+    <key name="panel-icon-type" enum="com.github.amezin.ddterm.PanelIconType">
+      <default>'menu-button'</default>
+    </key>
     <key name="theme-variant" enum="com.github.amezin.ddterm.ThemeVariant">
       <default>'system'</default>
     </key>
@@ -99,8 +193,29 @@
       <default>true</default>
     </key>
 
+    <key name="override-window-animation" type="b">
+      <default>true</default>
+    </key>
+    <key name="show-animation" enum="com.github.amezin.ddterm.AnimationMode">
+      <default>'linear'</default>
+    </key>
+    <key name="hide-animation" enum="com.github.amezin.ddterm.AnimationMode">
+      <default>'linear'</default>
+    </key>
+    <key name="show-animation-duration" type="d">
+      <default>0.15</default>
+      <range min="0.0" max="1.0"/>
+    </key>
+    <key name="hide-animation-duration" type="d">
+      <default>0.15</default>
+      <range min="0.0" max="1.0"/>
+    </key>
+
     <key name="tab-policy" enum="com.github.amezin.ddterm.TabsbarPolicy">
       <default>'always'</default>
+    </key>
+    <key name="tab-position" enum="com.github.amezin.ddterm.TabPosition">
+      <default>'bottom'</default>
     </key>
     <key name="tab-expand" type="b">
       <default>true</default>
@@ -108,10 +223,23 @@
     <key name="tab-close-buttons" type="b">
       <default>true</default>
     </key>
+    <key name="tab-label-width" type="d">
+      <default>0.1</default>
+      <range min="0.0" max="0.5"/>
+    </key>
+    <key name="tab-label-ellipsize-mode" enum="com.github.amezin.ddterm.EllipsizeMode">
+      <default>'none'</default>
+    </key>
     <key name="new-tab-button" type="b">
       <default>true</default>
     </key>
+    <key name="new-tab-front-button" type="b">
+      <default>false</default>
+    </key>
     <key name="tab-switcher-popup" type="b">
+      <default>true</default>
+    </key>
+    <key name="notebook-border" type="b">
       <default>true</default>
     </key>
     <key name="tab-title-template" type="s">
@@ -137,6 +265,27 @@
       <default>true</default>
     </key>
     <key name="audible-bell" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls-as-is" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls-file" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls-http" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls-voip" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls-email" type="b">
+      <default>true</default>
+    </key>
+    <key name="detect-urls-news-man" type="b">
       <default>true</default>
     </key>
 
@@ -173,6 +322,9 @@
     <key name="highlight-foreground-color" type="s">
       <default>'#ffffff'</default>
     </key>
+    <key name="transparent-background" type="b">
+      <default>true</default>
+    </key>
     <key name="background-opacity" type="d">
       <default>0.9</default>
       <range min="0.0" max="1.0"/>
@@ -204,6 +356,9 @@
     </key>
     <key name="custom-command" type="s">
       <default>''</default>
+    </key>
+    <key name="preserve-working-directory" type="b">
+      <default>true</default>
     </key>
 
     <key name="show-scrollbar" type="b">
@@ -240,7 +395,28 @@
     <key name="ddterm-toggle-hotkey" type="as">
       <default><![CDATA[['F12']]]></default>
     </key>
+    <key name="ddterm-activate-hotkey" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
     <key name="shortcut-window-hide" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
+    <key name="shortcut-window-size-inc" type="as">
+      <default><![CDATA[['<Ctrl>Down']]]></default>
+    </key>
+    <key name="shortcut-window-size-dec" type="as">
+      <default><![CDATA[['<Ctrl>Up']]]></default>
+    </key>
+    <key name="shortcut-background-opacity-inc" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
+    <key name="shortcut-background-opacity-dec" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
+    <key name="shortcut-toggle-maximize" type="as">
+      <default><![CDATA[['F11']]]></default>
+    </key>
+    <key name="shortcut-toggle-transparent-background" type="as">
       <default><![CDATA[[]]]></default>
     </key>
     <key name="hide-window-on-esc" type="b">
@@ -267,6 +443,15 @@
     <key name="shortcut-win-new-tab" type="as">
       <default><![CDATA[['<Ctrl><Shift>n']]]></default>
     </key>
+    <key name="shortcut-win-new-tab-front" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
+    <key name="shortcut-win-new-tab-before-current" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
+    <key name="shortcut-win-new-tab-after-current" type="as">
+      <default><![CDATA[[]]]></default>
+    </key>
     <key name="shortcut-page-close" type="as">
       <default><![CDATA[['<Ctrl><Shift>q']]]></default>
     </key>
@@ -276,11 +461,26 @@
     <key name="shortcut-next-tab" type="as">
       <default><![CDATA[['<Ctrl>Page_Down']]]></default>
     </key>
+    <key name="shortcut-move-tab-prev" type="as">
+      <default><![CDATA[['<Ctrl><Shift>Page_Up']]]></default>
+    </key>
+    <key name="shortcut-move-tab-next" type="as">
+      <default><![CDATA[['<Ctrl><Shift>Page_Down']]]></default>
+    </key>
     <key name="shortcut-set-custom-tab-title" type="as">
       <default><![CDATA[[]]]></default>
     </key>
     <key name="shortcut-reset-tab-title" type="as">
       <default><![CDATA[[]]]></default>
+    </key>
+    <key name="shortcut-find" type="as">
+      <default><![CDATA[['<Ctrl><Shift>F']]]></default>
+    </key>
+    <key name="shortcut-find-next" type="as">
+      <default><![CDATA[['<Ctrl><Shift>G']]]></default>
+    </key>
+    <key name="shortcut-find-prev" type="as">
+      <default><![CDATA[['<Ctrl><Shift>H']]]></default>
     </key>
 
     <key name="shortcut-switch-to-tab-1" type="as">

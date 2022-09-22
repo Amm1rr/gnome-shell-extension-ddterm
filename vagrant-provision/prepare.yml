@@ -1,0 +1,6 @@
+---
+- hosts: all
+  gather_facts: yes
+  become: yes
+  tasks:
+    - include_tasks: prepare-{{ ansible_facts['os_family'] | lower }}.yml

@@ -1,10 +1,33 @@
+/*
+    Copyright © 2020, 2021 Aleksandr Mezin
+
+    This file is part of ddterm GNOME Shell extension.
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 'use strict';
 
-/* exported TerminalPage */
+/* exported TerminalPage TerminalSettings */
 
-const { GLib, GObject, Gio, Pango, Gdk, Gtk, Vte } = imports.gi;
+const { GLib, GObject, Gio, Gdk, Gtk, Vte } = imports.gi;
 const { Handlebars } = imports.handlebars;
-const { util } = imports;
+const { rxjs } = imports.rxjs;
+const { urldetect_patterns, rxutil, settings } = imports;
+const Me = imports.misc.extensionUtils.getCurrentExtension();
+
+const GVARIANT_FALSE = GLib.Variant.new_boolean(false);
 
 const TITLE_TERMINAL_PROPERTIES = [
     'window-title',
@@ -29,16 +52,62 @@ Handlebars.registerHelper('hostname-from-uri', uri => {
     return '';
 });
 
-function terminal_spawn_callback(terminal, _pid, error) {
-    if (error)
-        terminal.feed(error.message);
+function ellipsize(str, length) {
+    if (str.length > length)
+        return `${str.slice(0, length)}…`;
+
+    return str;
 }
 
+Handlebars.registerHelper('truncate-chars', ellipsize);
+Handlebars.registerHelper('ellipsize', ellipsize);
+
+const PCRE2_UTF = 0x00080000;
+const PCRE2_NO_UTF_CHECK = 0x40000000;
+const PCRE2_UCP = 0x00020000;
+const PCRE2_MULTILINE = 0x00000400;
+const PCRE2_JIT_COMPLETE = 0x00000001;
+const PCRE2_JIT_PARTIAL_SOFT = 0x00000002;
+const PCRE2_CASELESS = 0x00000008;
+
+function jit_regex(regex) {
+    try {
+        regex.jit(PCRE2_JIT_COMPLETE);
+    } catch (ex) {
+        logError(ex, `Can't JIT compile ${regex} (PCRE2_JIT_COMPLETE)`);
+        return;
+    }
+
+    try {
+        regex.jit(PCRE2_JIT_PARTIAL_SOFT);
+    } catch (ex) {
+        logError(ex, `Can't JIT compile ${regex} (PCRE2_JIT_PARTIAL_SOFT)`);
+    }
+}
+
+function compile_regex(regex) {
+    const compiled = Vte.Regex.new_for_match(regex, -1, PCRE2_UTF | PCRE2_NO_UTF_CHECK | PCRE2_UCP | PCRE2_MULTILINE);
+    jit_regex(compiled);
+    return compiled;
+}
+
+function escape_regex(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const REGEX_URL_AS_IS = compile_regex(urldetect_patterns.REGEX_URL_AS_IS);
+const REGEX_URL_FILE = compile_regex(urldetect_patterns.REGEX_URL_FILE);
+const REGEX_URL_HTTP = compile_regex(urldetect_patterns.REGEX_URL_HTTP);
+const REGEX_URL_VOIP = compile_regex(urldetect_patterns.REGEX_URL_VOIP);
+const REGEX_EMAIL = compile_regex(urldetect_patterns.REGEX_EMAIL);
+const REGEX_NEWS_MAN = compile_regex(urldetect_patterns.REGEX_NEWS_MAN);
+
 GObject.type_ensure(Vte.Terminal);
+GObject.type_ensure(Gio.ThemedIcon);
 
 var TerminalPage = GObject.registerClass(
     {
-        Template: util.APP_DATA_DIR.get_child('terminalpage.ui').get_uri(),
+        Template: Me.dir.get_child('terminalpage.ui').get_uri(),
         Children: [
             'terminal',
             'tab_label',
@@ -48,202 +117,402 @@ var TerminalPage = GObject.registerClass(
             'switcher_item',
             'custom_title_popover',
             'custom_tab_title_entry',
+            'search_bar',
+            'search_entry',
         ],
         Properties: {
             'settings': GObject.ParamSpec.object(
-                'settings', '', '', GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT_ONLY, Gio.Settings
-            ),
-            'desktop-settings': GObject.ParamSpec.object(
-                'desktop-settings', '', '', GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT_ONLY, Gio.Settings
+                'settings', '', '', GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT_ONLY, settings.Settings
             ),
             'menus': GObject.ParamSpec.object(
                 'menus', '', '', GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT_ONLY, Gtk.Builder
             ),
-            'has-selection': GObject.ParamSpec.boolean(
-                'has-selection', '', '', GObject.ParamFlags.READABLE | GObject.ParamFlags.EXPLICIT_NOTIFY, false
-            ),
-            'has-clicked-hyperlink': GObject.ParamSpec.boolean(
-                'has-clicked-hyperlink', '', '', GObject.ParamFlags.READABLE | GObject.ParamFlags.EXPLICIT_NOTIFY, false
-            ),
-            'has-clicked-filename': GObject.ParamSpec.boolean(
-                'has-clicked-filename', '', '', GObject.ParamFlags.READABLE | GObject.ParamFlags.EXPLICIT_NOTIFY, false
-            ),
-            'switch-shortcut': GObject.ParamSpec.string(
-                'switch-shortcut', '', '', GObject.ParamFlags.WRITABLE, null
-            ),
         },
         Signals: {
             'close-request': {},
+            'new-tab-before-request': {},
+            'new-tab-after-request': {},
         },
     },
     class TerminalPage extends Gtk.Box {
         _init(params) {
             super._init(params);
 
-            this.clicked_filename = null;
-            this.clicked_hyperlink = null;
             this.clipboard = Gtk.Clipboard.get_default(Gdk.Display.get_default());
+            this.primary_selection = Gtk.Clipboard.get(Gdk.Atom.intern('PRIMARY', true));
+            this.child_pid = null;
 
-            this._switch_shortcut = null;
+            this.rx = rxutil.scope(this);
 
-            this.bind_settings_ro('show-scrollbar', this.scrollbar, 'visible');
-            this.bind_settings_ro('scroll-on-output', this.terminal);
-            this.bind_settings_ro('scroll-on-keystroke', this.terminal);
-            this.bind_settings_ro('text-blink-mode', this.terminal);
-            this.bind_settings_ro('cursor-blink-mode', this.terminal);
-            this.bind_settings_ro('cursor-shape', this.terminal);
-            this.bind_settings_ro('allow-hyperlink', this.terminal);
-            this.bind_settings_ro('audible-bell', this.terminal);
-            this.bind_settings_ro('bold-is-bright', this.terminal);
-            this.bind_settings_ro('backspace-binding', this.terminal);
-            this.bind_settings_ro('delete-binding', this.terminal);
-            this.bind_settings_ro('pointer-autohide', this.terminal);
-            this.bind_settings_ro('tab-close-buttons', this.close_button, 'visible');
-
-            // These widgets aren't children of the TerminalPage, so it's necessary to call
-            // .destroy() on them manually.
-            // Widgets should be destroyed after all settings are unbound.
-            this.signal_connect(this, 'destroy', () => this.tab_label.destroy());
-            this.signal_connect(this, 'destroy', () => this.switcher_item.destroy());
-
-            this.method_handler(this.settings, 'changed::scrollback-lines', this.update_scrollback);
-            this.method_handler(this.settings, 'changed::scrollback-unlimited', this.update_scrollback);
-            this.update_scrollback();
-
-            this.method_handler(this.settings, 'changed::custom-font', this.update_font);
-            this.method_handler(this.settings, 'changed::use-system-font', this.update_font);
-            this.method_handler(this.desktop_settings, 'changed::monospace-font-name', this.update_font);
-            this.update_font();
-
-            this.method_handler(this.settings, 'changed::cjk-utf8-ambiguous-width', this.update_ambiguous_width);
-            this.update_ambiguous_width();
-
-            this.method_handler(this.settings, 'changed::foreground-color', this.update_color_foreground);
-            this.method_handler(this.terminal, 'style-updated', this.update_color_foreground);
-
-            this.method_handler(this.settings, 'changed::background-color', this.update_color_background);
-            this.method_handler(this.settings, 'changed::background-opacity', this.update_color_background);
-            this.method_handler(this.terminal, 'style-updated', this.update_color_background);
-
-            this.method_handler(this.settings, 'changed::bold-color', this.update_color_bold);
-            this.method_handler(this.settings, 'changed::bold-color-same-as-fg', this.update_color_bold);
-
-            this.method_handler(this.settings, 'changed::cursor-background-color', this.update_color_cursor);
-            this.method_handler(this.settings, 'changed::cursor-colors-set', this.update_color_cursor);
-
-            this.method_handler(this.settings, 'changed::cursor-foreground-color', this.update_color_cursor_foreground);
-            this.method_handler(this.settings, 'changed::cursor-colors-set', this.update_color_cursor_foreground);
-
-            this.method_handler(this.settings, 'changed::highlight-background-color', this.update_color_highlight);
-            this.method_handler(this.settings, 'changed::highlight-colors-set', this.update_color_highlight);
-
-            this.method_handler(this.settings, 'changed::highlight-foreground-color', this.update_color_highlight_foreground);
-            this.method_handler(this.settings, 'changed::highlight-colors-set', this.update_color_highlight_foreground);
-
-            this.method_handler(this.settings, 'changed::palette', this.update_palette);
-
-            this.method_handler(this.settings, 'changed::use-theme-colors', this.update_all_colors);
-            this.update_all_colors();
-
-            this._child_exited = false;
-            this._eof = false;
-
-            this.signal_connect(this.terminal, 'eof', () => {
-                this._eof = true;
-                if (this._child_exited)
-                    this.close_request();
-            });
-            this.signal_connect(this.terminal, 'child-exited', () => {
-                this._child_exited = true;
-                if (this._eof)
-                    this.close_request();
-            });
-            this.signal_connect(this.terminal, 'selection-changed', () => {
-                this.notify('has-selection');
+            [
+                'scroll-on-output',
+                'scroll-on-keystroke',
+                'allow-hyperlink',
+                'audible-bell',
+                'bold-is-bright',
+                'pointer-autohide',
+                'scrollback-lines',
+                'font-desc',
+            ].forEach(property => {
+                this.rx.subscribe(
+                    this.settings.resolved[property] || this.settings[property],
+                    rxutil.property(this.terminal, property)
+                );
             });
 
-            this.default_title_template = Handlebars.compile(this.settings.settings_schema.get_key('tab-title-template').get_default_value().unpack());
-            this.title_template = this.default_title_template;
+            [
+                'text-blink-mode',
+                'cursor-blink-mode',
+                'cursor-shape',
+                'backspace-binding',
+                'delete-binding',
+                'cjk-utf8-ambiguous-width',
+            ].forEach(
+                property => this.rx.subscribe(
+                    this.settings[property].enum,
+                    rxutil.property(this.terminal, property)
+                )
+            );
 
-            const gvariant_false = GLib.Variant.new_boolean(false);
+            const style_context = rxutil.signal(this.terminal, 'style-updated').pipe(
+                rxjs.startWith([this.terminal]),
+                rxjs.map(([widget]) => widget.get_style_context())
+            );
+            const style_color = property => style_context.pipe(
+                rxjs.map(context => context.get_property(property, context.get_state()))
+            );
+
+            const foreground = this.settings.resolved_foreground_color(style_color('color'));
+            const background = this.settings.resolved_background_color(style_color('background-color'));
+
+            this.rx.subscribe(
+                rxjs.combineLatest(foreground, background, this.settings.palette),
+                args => this.terminal.set_colors(...args)
+            );
+
+            this.rx.subscribe(this.settings.resolved['bold-color'], color => {
+                this.terminal.set_color_bold(color);
+            });
+
+            this.rx.subscribe(this.settings.resolved['cursor-background-color'], color => {
+                this.terminal.set_color_cursor(color);
+            });
+
+            this.rx.subscribe(this.settings.resolved['cursor-foreground-color'], color => {
+                this.terminal.set_color_cursor_foreground(color);
+            });
+
+            this.rx.subscribe(this.settings.resolved['highlight-background-color'], color => {
+                this.terminal.set_color_highlight(color);
+            });
+
+            this.rx.subscribe(this.settings.resolved['highlight-foreground-color'], color => {
+                this.terminal.set_color_highlight_foreground(color);
+            });
+
+            const url_regex = (enable, regex, prefix) => {
+                return enable.pipe(
+                    rxjs.map(v => v ? { regex, prefix } : null)
+                );
+            };
+
+            this.rx.subscribe(
+                rxjs.combineLatest(
+                    url_regex(this.settings.resolved['detect-urls-as-is'], REGEX_URL_AS_IS),
+                    url_regex(this.settings.resolved['detect-urls-file'], REGEX_URL_FILE),
+                    url_regex(this.settings.resolved['detect-urls-http'], REGEX_URL_HTTP, 'http://'),
+                    url_regex(this.settings.resolved['detect-urls-voip'], REGEX_URL_VOIP),
+                    url_regex(this.settings.resolved['detect-urls-email'], REGEX_EMAIL, 'mailto:'),
+                    url_regex(this.settings.resolved['detect-urls-news-man'], REGEX_NEWS_MAN)
+                ),
+                configs => {
+                    this.terminal.match_remove_all();
+
+                    this.url_prefix = Object.fromEntries(
+                        configs.filter(Boolean).map(({ regex, prefix }) => {
+                            const tag = this.terminal.match_add_regex(regex, 0);
+                            this.terminal.match_set_cursor_name(tag, 'pointer');
+                            return [tag, prefix];
+                        })
+                    );
+                }
+            );
+
+            const toplevel = rxutil.signal(this, 'hierarchy-changed').pipe(
+                rxjs.startWith([this]),
+                rxjs.map(([widget]) => widget.get_toplevel())
+            );
+
+            const window_width = toplevel.pipe(
+                rxjs.switchMap(
+                    widget => rxutil.signal(widget, 'configure-event').pipe(
+                        rxjs.startWith([widget])
+                    )
+                ),
+                rxjs.map(([widget]) => widget.get_allocated_width())
+            );
+
+            const tab_label_width = rxjs.combineLatest(
+                window_width,
+                this.settings['tab-label-width']
+            ).pipe(
+                rxjs.map(([a, b]) => Math.floor(a * b))
+            );
+
+            this.rx.subscribe(
+                tab_label_width,
+                rxutil.property(this.tab_label, 'width_request')
+            );
+
+            this.rx.subscribe(
+                this.settings['tab-label-ellipsize-mode'].enum,
+                rxutil.property(this.tab_label_label, 'ellipsize')
+            );
+
+            this.rx.subscribe(
+                this.settings['show-scrollbar'],
+                rxutil.property(this.scrollbar, 'visible')
+            );
+
+            this.rx.subscribe(
+                this.settings['tab-close-buttons'],
+                rxutil.property(this.close_button, 'visible')
+            );
+
+            const custom_title_template = rxutil.property(this.custom_tab_title_entry, 'text');
+            const custom_title_template_compiled = custom_title_template.pipe(
+                rxjs.mergeMap(template => {
+                    try {
+                        return rxjs.of(Handlebars.compile(template));
+                    } catch {
+                        return rxjs.EMPTY;
+                    }
+                }),
+                settings.share()
+            );
+
             this.use_custom_title_action = new Gio.SimpleAction({
                 'name': 'use-custom-title',
-                'state': gvariant_false,
-                'parameter-type': gvariant_false.get_type(),
+                'state': GVARIANT_FALSE,
+                'parameter-type': GVARIANT_FALSE.get_type(),
             });
-            this.method_handler(this.use_custom_title_action, 'activate', this.toggle_custom_title);
-            this.method_handler(this.settings, 'changed::tab-title-template', this.update_tab_title_template);
-            this.method_handler(this.custom_tab_title_entry, 'changed', this.update_tab_title_template);
-
-            TITLE_TERMINAL_PROPERTIES.forEach(prop => {
-                this.method_handler(this.terminal, `notify::${prop}`, this.update_tab_title);
+            const use_custom_title = rxutil.property(this.use_custom_title_action, 'state').pipe(
+                rxjs.map(v => v.unpack())
+            );
+            const title_template_compiled = rxutil.switch_on(use_custom_title, {
+                true: custom_title_template_compiled,
+                false: this.settings.title_template_compiled,
             });
 
-            this.update_tab_title_template();
+            const context_entry = name => rxjs.pipe(
+                rxjs.distinctUntilChanged(),
+                rxjs.map(v => [name, v])
+            );
 
-            this.terminal_popup_menu = Gtk.Menu.new_from_model(this.menus.get_object('terminal-popup'));
-            this.setup_popup_menu(this.terminal, this.terminal_popup_menu);
-            this.method_handler(this.terminal, 'button-press-event', this.terminal_button_press_early);
+            this.switch_shortcut = this.make_behavior_subject();
 
-            const tab_popup_menu = Gtk.Menu.new_from_model(this.menus.get_object('tab-popup'));
-            this.setup_popup_menu(this.tab_label, tab_popup_menu);
+            const title_context_entries = TITLE_TERMINAL_PROPERTIES.map(
+                prop => rxutil.property(this.terminal, prop).pipe(context_entry(prop))
+            ).concat([
+                this.switch_shortcut.pipe(context_entry('switch-shortcut')),
+            ]);
 
-            const actions = new Gio.SimpleActionGroup();
+            const title_context = rxjs.combineLatest(...title_context_entries).pipe(
+                rxjs.map(Object.fromEntries),
+                settings.share()
+            );
+
+            const title = rxjs.combineLatest(
+                title_context,
+                title_template_compiled
+            ).pipe(
+                rxjs.mergeMap(([context, template]) => {
+                    try {
+                        return rxjs.of(template(context));
+                    } catch {
+                        try {
+                            return rxjs.of(this.settings.fallback_title_template(context));
+                        } catch {
+                            logError("Can't apply template");
+                            return rxjs.EMPTY;
+                        }
+                    }
+                })
+            );
+
+            this.rx.subscribe(title, value => {
+                this.tab_label_label.label = value;
+                this.switcher_item.text = value;
+                this.switcher_item.use_markup = true;
+            });
+
+            this.rx.subscribe(use_custom_title, state => {
+                if (state)
+                    this.custom_title_popover.popup();
+            });
+
+            this.rx.subscribe(
+                this.settings['tab-title-template'].pipe(rxutil.disable_if(use_custom_title)),
+                rxutil.property(this.custom_tab_title_entry, 'text')
+            );
+
+            this.rx.subscribe(
+                rxutil.property(this.custom_tab_title_entry, 'text-length'),
+                rxutil.property(this.custom_tab_title_entry, 'width-chars')
+            );
+
+            // Should be connected before setup_popup_menu() on this.terminal!
+            this.rx.connect(
+                this.terminal,
+                'button-press-event',
+                this.terminal_button_press_early.bind(this)
+            );
+
+            this.terminal_popup_menu = this.setup_popup_menu(this.terminal, 'terminal-popup');
+            this.setup_popup_menu(this.tab_label, 'tab-popup');
+
+            const actions = this.rx.make_simple_actions({
+                'close': () => this.emit('close-request'),
+                'new-tab-before': () => this.emit('new-tab-before-request'),
+                'new-tab-after': () => this.emit('new-tab-after-request'),
+            });
+
+            actions.add_action(this.use_custom_title_action);
+
             this.insert_action_group('page', actions);
             this.tab_label.insert_action_group('page', actions);
 
-            this.method_action(actions, 'close', this.close_request);
-            actions.add_action(this.use_custom_title_action);
+            const terminal_actions = this.rx.make_simple_actions({
+                'copy': this.copy.bind(this),
+                'copy-html': this.copy_html.bind(this),
+                'open-hyperlink': this.open_hyperlink.bind(this),
+                'copy-hyperlink': this.copy_hyperlink.bind(this),
+                'copy-filename': this.copy_filename.bind(this),
+                'paste': this.paste.bind(this),
+                'select-all': this.select_all.bind(this),
+                'reset': this.reset.bind(this),
+                'reset-and-clear': this.reset_and_clear.bind(this),
+                'find': this.find.bind(this),
+                'stop-search': this.stop_search.bind(this),
+                'find-next': this.find_next.bind(this),
+                'find-prev': this.find_prev.bind(this),
+            });
 
-            const terminal_actions = new Gio.SimpleActionGroup();
+            this.search_match_case_action = Gio.SimpleAction.new_stateful('search-match-case', null, GVARIANT_FALSE);
+            terminal_actions.add_action(this.search_match_case_action);
+
+            this.search_whole_word_action = Gio.SimpleAction.new_stateful('search-whole-word', null, GVARIANT_FALSE);
+            terminal_actions.add_action(this.search_whole_word_action);
+
+            this.search_regex_action = Gio.SimpleAction.new_stateful('search-regex', null, GVARIANT_FALSE);
+            terminal_actions.add_action(this.search_regex_action);
+
+            const search_wrap_action = Gio.SimpleAction.new_stateful('search-wrap', null, GVARIANT_FALSE);
+            terminal_actions.add_action(search_wrap_action);
+
+            this.rx.subscribe(rxutil.property(search_wrap_action, 'state'), state => {
+                this.terminal.search_set_wrap_around(state.unpack());
+            });
+
+            const has_selection = rxutil.signal(this.terminal, 'selection-changed').pipe(
+                rxjs.startWith([this.terminal]),
+                rxjs.map(([widget]) => widget.get_has_selection())
+            );
+
+            this.clicked_hyperlink = this.make_behavior_subject();
+            this.clicked_filename = this.make_behavior_subject();
+
+            const is_nonnull = rxjs.map(value => value !== null);
+
+            const has_clicked_hyperlink = this.clicked_hyperlink.pipe(is_nonnull);
+            const has_clicked_filename = this.clicked_filename.pipe(is_nonnull);
+
+            const search_bar_revealed = rxutil.property(this.search_bar, 'reveal-child');
+
+            const terminal_actions_enable = {
+                'copy': has_selection,
+                'copy-html': has_selection,
+                'open-hyperlink': has_clicked_hyperlink,
+                'copy-hyperlink': has_clicked_hyperlink,
+                'copy-filename': has_clicked_filename,
+                'find-next': search_bar_revealed,
+                'find-prev': search_bar_revealed,
+                'search-match-case': search_bar_revealed,
+                'search-whole-word': search_bar_revealed,
+                'search-regex': search_bar_revealed,
+                'search-wrap': search_bar_revealed,
+            };
+
+            for (const [name, observable] of Object.entries(terminal_actions_enable)) {
+                const action = terminal_actions.lookup_action(name);
+                this.rx.subscribe(observable, rxutil.property(action, 'enabled'));
+            }
+
             this.insert_action_group('terminal', terminal_actions);
 
-            const copy_action = this.method_action(terminal_actions, 'copy', this.copy);
-            this.bind_property('has-selection', copy_action, 'enabled', GObject.BindingFlags.SYNC_CREATE);
+            this.rx.connect(this.search_entry, 'stop-search', this.stop_search.bind(this));
+            this.rx.connect(this.search_entry, 'previous-match', this.find_prev.bind(this));
+            this.rx.connect(this.search_entry, 'next-match', this.find_next.bind(this));
+            this.rx.connect(this.search_entry, 'activate', this.find_next.bind(this));
 
-            const copy_html_action = this.method_action(terminal_actions, 'copy-html', this.copy_html);
-            this.bind_property('has-selection', copy_html_action, 'enabled', GObject.BindingFlags.SYNC_CREATE);
+            // These signal handlers return values - can't be handled by rxutil.signal()
+            for (const signal_name of ['key-press-event', 'key-release-event']) {
+                this.rx.connect(this.search_bar, signal_name, (_, event) => {
+                    return this.search_entry.handle_event(event);
+                });
+            }
 
-            const open_hyperlink_action = this.method_action(terminal_actions, 'open-hyperlink', this.open_hyperlink);
-            this.bind_property('has-clicked-hyperlink', open_hyperlink_action, 'enabled', GObject.BindingFlags.SYNC_CREATE);
+            // These widgets aren't children of the TerminalPage, so they must
+            // be destroy()ed manually.
+            for (const widget of [this.tab_label, this.switcher_item, this.custom_title_popover]) {
+                this.rx.destroy_signal.subscribe(() => {
+                    widget.destroy();
+                });
+            }
 
-            const copy_hyperlink_action = this.method_action(terminal_actions, 'copy-hyperlink', this.copy_hyperlink);
-            this.bind_property('has-clicked-hyperlink', copy_hyperlink_action, 'enabled', GObject.BindingFlags.SYNC_CREATE);
-
-            const copy_filename_action = this.method_action(terminal_actions, 'copy-filename', this.copy_filename);
-            this.bind_property('has-clicked-filename', copy_filename_action, 'enabled', GObject.BindingFlags.SYNC_CREATE);
-
-            this.method_action(terminal_actions, 'paste', this.paste);
-            this.method_action(terminal_actions, 'select-all', this.select_all);
-            this.method_action(terminal_actions, 'reset', this.reset);
-            this.method_action(terminal_actions, 'reset-and-clear', this.reset_and_clear);
+            this.rx.subscribe(
+                rxjs.combineLatest(
+                    rxutil.signal(this.terminal, 'eof'),
+                    rxutil.signal(this.terminal, 'child-exited')
+                ),
+                () => {
+                    this.emit('close-request');
+                }
+            );
         }
 
-        get has_clicked_filename() {
-            return this.clicked_filename !== null;
+        make_behavior_subject(value) {
+            const subject = new rxjs.BehaviorSubject(value);
+            this.rx.destroy_signal.subscribe(() => subject.complete());
+            return subject;
         }
 
-        get has_clicked_hyperlink() {
-            return this.clicked_hyperlink !== null;
+        get_cwd() {
+            const uri = this.terminal.current_directory_uri;
+            if (uri)
+                return GLib.filename_from_uri(uri)[0];
+
+            try {
+                return GLib.file_read_link(`/proc/${this.child_pid}/cwd`);
+            } catch {
+                return null;
+            }
         }
 
-        spawn() {
+        spawn(cwd = null) {
             let argv;
             let spawn_flags;
 
-            const mode = this.settings.get_string('command');
-            if (mode === 'custom-command') {
-                const command = this.settings.get_string('custom-command');
-
+            if (this.settings['command'].value === 'custom-command') {
                 let _;
-                [_, argv] = GLib.shell_parse_argv(command);
+                [_, argv] = GLib.shell_parse_argv(this.settings['custom-command'].value);
 
                 spawn_flags = GLib.SpawnFlags.SEARCH_PATH_FROM_ENVP;
-            } else if (mode === 'user-shell' || mode === 'user-shell-login') {
+            } else {
                 const shell = Vte.get_user_shell();
                 const name = GLib.path_get_basename(shell);
 
-                if (mode === 'user-shell-login')
+                if (this.settings['command'].value === 'user-shell-login')
                     argv = [shell, `-${name}`];
                 else
                     argv = [shell, name];
@@ -252,130 +521,15 @@ var TerminalPage = GObject.registerClass(
 
                 if (name !== shell)
                     spawn_flags |= GLib.SpawnFlags.SEARCH_PATH_FROM_ENVP;
-            } else {
-                this.terminal.feed(`Invalid command: ${mode}`);
-                return;
             }
 
-            this.terminal.spawn_async(
-                Vte.PtyFlags.DEFAULT, null, argv, null, spawn_flags, null, -1, null, terminal_spawn_callback
-            );
-        }
+            this.terminal.spawn_async(Vte.PtyFlags.DEFAULT, cwd, argv, null, spawn_flags, null, -1, null, (terminal, pid, error) => {
+                if (error)
+                    terminal.feed(error.message);
 
-        close_request() {
-            this.emit('close-request');
-        }
-
-        get_font_settings() {
-            if (this.settings.get_boolean('use-system-font'))
-                return this.desktop_settings.get_string('monospace-font-name');
-            else
-                return this.settings.get_string('custom-font');
-        }
-
-        update_font() {
-            this.terminal.font_desc = Pango.FontDescription.from_string(this.get_font_settings());
-        }
-
-        update_ambiguous_width() {
-            this.terminal.cjk_ambiguous_width = this.settings.get_enum('cjk-utf8-ambiguous-width');
-        }
-
-        get_style_color_settings(key, style_property) {
-            if (!this.settings.get_boolean('use-theme-colors')) {
-                const result = util.parse_rgba(this.settings.get_string(key));
-                if (result !== null)
-                    return result;
-            }
-
-            const context = this.terminal.get_style_context();
-            return context.get_property(style_property, context.get_state());
-        }
-
-        get_override_color_settings(key, enable_key, enable_reverse = false) {
-            if (this.settings.get_boolean('use-theme-colors'))
-                return null;
-
-            if (this.settings.get_boolean(enable_key) === enable_reverse)
-                return null;
-
-            return util.parse_rgba(this.settings.get_string(key));
-        }
-
-        get_color_foreground() {
-            return this.get_style_color_settings('foreground-color', 'color');
-        }
-
-        get_color_background() {
-            const background = this.get_style_color_settings('background-color', 'background-color');
-            background.alpha = this.settings.get_double('background-opacity');
-            return background;
-        }
-
-        update_color_foreground() {
-            this.terminal.set_color_foreground(this.get_color_foreground());
-        }
-
-        update_color_background() {
-            this.terminal.set_color_background(this.get_color_background());
-        }
-
-        update_palette() {
-            this.terminal.set_colors(
-                this.get_color_foreground(),
-                this.get_color_background(),
-                this.settings.get_strv('palette').map(util.parse_rgba)
-            );
-        }
-
-        update_color_bold() {
-            this.terminal.set_color_bold(
-                this.get_override_color_settings('bold-color', 'bold-color-same-as-fg', true)
-            );
-        }
-
-        update_color_cursor() {
-            this.terminal.set_color_cursor(
-                this.get_override_color_settings('cursor-background-color', 'cursor-colors-set')
-            );
-        }
-
-        update_color_cursor_foreground() {
-            this.terminal.set_color_cursor_foreground(
-                this.get_override_color_settings('cursor-foreground-color', 'cursor-colors-set')
-            );
-        }
-
-        update_color_highlight() {
-            this.terminal.set_color_highlight(
-                this.get_override_color_settings('highlight-background-color', 'highlight-colors-set')
-            );
-        }
-
-        update_color_highlight_foreground() {
-            this.terminal.set_color_highlight_foreground(
-                this.get_override_color_settings('highlight-foreground-color', 'highlight-colors-set')
-            );
-        }
-
-        update_all_colors() {
-            this.update_palette();
-            this.update_color_bold();
-            this.update_color_cursor();
-            this.update_color_cursor_foreground();
-            this.update_color_highlight();
-            this.update_color_highlight_foreground();
-        }
-
-        update_scrollback() {
-            if (this.settings.get_boolean('scrollback-unlimited'))
-                this.terminal.scrollback_lines = -1;
-            else
-                this.terminal.scrollback_lines = this.settings.get_int('scrollback-lines');
-        }
-
-        get has_selection() {
-            return this.terminal.get_has_selection();
+                if (pid)
+                    this.child_pid = pid;
+            });
         }
 
         copy() {
@@ -402,23 +556,46 @@ var TerminalPage = GObject.registerClass(
             this.terminal.reset(true, true);
         }
 
+        open_hyperlink() {
+            Gtk.show_uri_on_window(this.get_ancestor(Gtk.Window), this.clicked_hyperlink.value, Gdk.CURRENT_TIME);
+        }
+
+        copy_hyperlink() {
+            this.clipboard.set_text(this.clicked_hyperlink.value, -1);
+        }
+
+        copy_filename() {
+            this.clipboard.set_text(this.clicked_filename.value, -1);
+        }
+
         terminal_button_press_early(_terminal, event) {
             const state = event.get_state()[1];
             const button = event.get_button()[1];
 
-            this.clicked_hyperlink = this.terminal.hyperlink_check_event(event);
-            if (this.clicked_hyperlink) {
-                try {
-                    this.clicked_filename = GLib.filename_from_uri(this.clicked_hyperlink)[0];
-                } catch {
-                    this.clicked_filename = null;
+            let clicked_hyperlink = this.terminal.hyperlink_check_event(event);
+
+            if (!clicked_hyperlink) {
+                const [url, tag] = this.terminal.match_check_event(event);
+                if (url && tag !== null) {
+                    const prefix = this.url_prefix[tag];
+                    if (prefix && !url.toLowerCase().startsWith(prefix))
+                        clicked_hyperlink = prefix + url;
+                    else
+                        clicked_hyperlink = url;
                 }
-            } else {
-                this.clicked_filename = null;
             }
 
-            this.notify('has-clicked-filename');
-            this.notify('has-clicked-hyperlink');
+            let clicked_filename = null;
+
+            if (clicked_hyperlink) {
+                try {
+                    clicked_filename = GLib.filename_from_uri(clicked_hyperlink)[0];
+                } catch {
+                }
+            }
+
+            this.clicked_filename.next(clicked_filename);
+            this.clicked_hyperlink.next(clicked_hyperlink);
 
             if (state & Gdk.ModifierType.CONTROL_MASK) {
                 if ([Gdk.BUTTON_PRIMARY, Gdk.BUTTON_MIDDLE].includes(button)) {
@@ -439,23 +616,7 @@ var TerminalPage = GObject.registerClass(
             return false;
         }
 
-        open_hyperlink() {
-            Gtk.show_uri_on_window(this.get_ancestor(Gtk.Window), this.clicked_hyperlink, Gdk.CURRENT_TIME);
-        }
-
-        copy_hyperlink() {
-            this.clipboard.set_text(this.clicked_hyperlink, -1);
-        }
-
-        copy_filename() {
-            this.clipboard.set_text(this.clicked_filename, -1);
-        }
-
-        get switch_shortcut() {
-            return this._switch_shortcut;
-        }
-
-        set switch_shortcut(value) {
+        set_switch_shortcut(value) {
             let label = '';
             if (value) {
                 const [key, mods] = Gtk.accelerator_parse(value);
@@ -463,82 +624,86 @@ var TerminalPage = GObject.registerClass(
                     label = Gtk.accelerator_get_label(key, mods);
             }
 
-            this._switch_shortcut = label;
-            this.update_tab_title();
+            this.switch_shortcut.next(label);
         }
 
-        method_action(group, name, method) {
-            const action = new Gio.SimpleAction({
-                name,
-            });
-            this.method_handler(action, 'activate', method);
-            group.add_action(action);
-            return action;
-        }
-
-        setup_popup_menu(widget, menu, widget_anchor = Gdk.Gravity.SOUTH, menu_anchor = Gdk.Gravity.SOUTH) {
+        setup_popup_menu(widget, menu_name, widget_anchor = Gdk.Gravity.SOUTH, menu_anchor = Gdk.Gravity.SOUTH) {
+            const menu = Gtk.Menu.new_from_model(this.menus.get_object(menu_name));
             menu.attach_widget = widget;
 
-            const press_event_id = widget.connect_after('button-press-event', (_, event) => {
+            // https://github.com/ddterm/gnome-shell-extension-ddterm/issues/116
+            menu.get_style_context().add_class(Gtk.STYLE_CLASS_CONTEXT_MENU);
+
+            // Signal handlers that return values can't be implemented with rxutil.signal()
+            this.rx.connect_after(widget, 'button-press-event', (_, event) => {
                 if (!event.triggers_context_menu())
                     return false;
 
                 menu.popup_at_pointer(event);
                 return true;
             });
-            this.disconnect_on_destroy(widget, press_event_id);
 
-            const popup_menu_id = widget.connect('popup-menu', () => {
+            // Signal handlers that return values can't be implemented with rxutil.signal()
+            this.rx.connect(widget, 'popup-menu', () => {
                 menu.popup_at_widget(widget, widget_anchor, menu_anchor, null);
                 return true;
             });
-            this.disconnect_on_destroy(widget, popup_menu_id);
+
+            return menu;
         }
 
-        update_tab_title_template() {
-            if (!this.use_custom_title_action.state.unpack())
-                this.custom_tab_title_entry.text = this.settings.get_string('tab-title-template');
-
-            this.custom_tab_title_entry.width_chars = this.custom_tab_title_entry.text_length;
-
-            try {
-                this.title_template = Handlebars.compile(this.custom_tab_title_entry.text);
-            } catch {}
-
-            this.update_tab_title();
-        }
-
-        update_tab_title() {
-            const context = {
-                'switch-shortcut': this.switch_shortcut,
-            };
-
-            TITLE_TERMINAL_PROPERTIES.forEach(prop => {
-                context[prop] = this.terminal[prop];
-            });
-
-            let title;
-            try {
-                title = this.title_template(context);
-            } catch {
-                title = this.default_title_template(context);
+        update_search_regex() {
+            let pattern = this.search_entry.text;
+            if (!pattern) {
+                this.terminal.search_set_regex(null, 0);
+                return;
             }
 
-            this.tab_label_label.label = title;
-            this.switcher_item.text = title;
+            if (!this.search_regex_action.state.unpack())
+                pattern = escape_regex(pattern);
 
-            // For whatever reason, 'use-markup' in .ui file has no effect
-            this.switcher_item.use_markup = true;
+            if (this.search_whole_word_action.state.unpack())
+                pattern = `\\b${pattern}\\b`;
+
+            let search_flags = PCRE2_UTF | PCRE2_NO_UTF_CHECK | PCRE2_UCP | PCRE2_MULTILINE;
+            if (!this.search_match_case_action.state.unpack())
+                search_flags |= PCRE2_CASELESS;
+
+            const search_regex = Vte.Regex.new_for_search(pattern, -1, search_flags);
+            jit_regex(search_regex);
+            this.terminal.search_set_regex(search_regex, 0);
         }
 
-        toggle_custom_title(_, state) {
-            this.use_custom_title_action.set_state(state);
-            this.update_tab_title_template();
+        find_next() {
+            this.update_search_regex();
+            this.terminal.search_find_next();
+        }
 
-            if (state.unpack())
-                this.custom_title_popover.popup();
+        find_prev() {
+            this.update_search_regex();
+            this.terminal.search_find_previous();
+        }
+
+        find() {
+            this.search_bar.reveal_child = true;
+
+            if (!this.terminal.get_has_selection()) {
+                this.search_entry.grab_focus();
+                return;
+            }
+
+            this.terminal.copy_primary();
+            this.primary_selection.request_text((_, text) => {
+                if (text)
+                    this.search_entry.text = text;
+
+                this.search_entry.grab_focus();
+            });
+        }
+
+        stop_search() {
+            this.search_bar.reveal_child = false;
+            this.terminal.grab_focus();
         }
     }
 );
-
-Object.assign(TerminalPage.prototype, util.UtilMixin);

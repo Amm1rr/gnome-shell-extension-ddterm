@@ -1,8 +1,8 @@
 # Another Drop Down Terminal Extension for GNOME Shell
 
-[extensions.gnome.org]
+[<img src="docs/get-it-on-ego.svg?sanitize=true" alt="Get it on GNOME Extensions" height="100" align="middle">][extensions.gnome.org]
 
-<img src="docs/screenshot.png" />
+<img src="docs/dropdown.gif" />
 
 Inspired by
 
@@ -20,6 +20,10 @@ Inspired by
 
 <img src="docs/prefs.gif" />
 
+## Review by [TechHut](https://www.youtube.com/channel/UCjSEJkpGbcZhvo0lr-44X_w)
+
+[![my favorite GNOME extension](http://img.youtube.com/vi/tF6_FJYca64/0.jpg)](http://www.youtube.com/watch?v=tF6_FJYca64)
+
 ## Installing
 
 The easiest way to install the extension is to go to [extensions.gnome.org].
@@ -29,123 +33,11 @@ release may be available here on GitHub, but not on [extensions.gnome.org] yet.
 
 [extensions.gnome.org]: https://extensions.gnome.org/extension/3780/ddterm/
 
-If you want to install from GitHub:
+If you want to install from GitHub: see [docs/INSTALL.md](docs/INSTALL.md)
 
-### Install from a prebuilt package
+## Toggle the terminal through D-Bus
 
-You can download a released version from
-[Releases](https://github.com/amezin/gnome-shell-extension-ddterm/releases)
-page. You need the file `ddterm@amezin.github.com.shell-extension.zip`.
+It's possible to toggle the terminal externally through D-Bus. For example,
+from command line:
 
-Or, you can download a prebuilt package for a branch from
-[Github Pages](https://amezin.github.io/gnome-shell-extension-ddterm/#prebuilt-extension-packages).
-
-Download it, then run:
-
-    $ gnome-extensions install -f /path/to/ddterm@amezin.github.com.shell-extension.zip
-
-#### Restart GNOME Shell
-
-After that, restart GNOME Shell - log out, log in back. On X11 you can restart
-the shell by pressing <kbd>Alt+F2</kbd>, <kbd>r</kbd>, <kbd>Enter</kbd>.
-
-#### Enable extension
-
-Then you can enable the extension using `gnome-tweaks` app, or by running:
-
-    $ gnome-extensions enable ddterm@amezin.github.com
-
-### Install from `git` repository
-
-#### Dependencies
-
-For installation from `git` repository, you should have build dependencies
-installed:
-
-- `gtk-builder-tool` (`libgtk-3-bin` package on Ubuntu, `gtk3-devel` on Fedora,
-`gtk3` package on Arch)
-
-- `gtk4-builder-tool` (`gtk4-devel` package on Fedora, `gtk4` package on Arch)
-
-- `xsltproc` (`xsltproc` package on Ubuntu, `libxslt` on Fedora and Arch)
-
-`gtk4-build-tool` and `xsltproc` are only necessary if you want Gtk 4/GNOME 40
-support. To build without them, run `make` with `WITH_GTK4=no`:
-`make WITH_GTK4=no develop` or `make WITH_GTK4=no install`.
-
-Or, if you have `docker` installed instead, you can run:
-
-    $ ./do-in-docker.sh make
-
-This will generate all necessary files, using CI image, and then
-`make install`/`make develop` won't need any dependencies.
-
-#### `make install`
-
-`git clone` the repository into arbitrary location, and run `make install`:
-
-    $ git clone https://github.com/amezin/gnome-shell-extension-ddterm.git
-    $ cd gnome-shell-extension-ddterm
-    $ make install
-
-It will build the extension package and install it.
-
-##### Restart GNOME Shell
-
-After that, restart GNOME Shell - log out, log in back. On X11 you can restart
-the shell by pressing <kbd>Alt+F2</kbd>, <kbd>r</kbd>, <kbd>Enter</kbd>.
-
-##### Enable extension
-
-Then you can enable the extension using `gnome-tweaks` app, or by running:
-
-    $ make enable
-
-in the repository.
-
-#### `make develop`
-
-You can simply symlink the repository into extensions directory. `make develop`
-will do it for you:
-
-    $ git clone https://github.com/amezin/gnome-shell-extension-ddterm.git
-    $ cd gnome-shell-extension-ddterm
-    $ make develop
-
-##### Restart GNOME Shell
-
-After that, restart GNOME Shell - log out, log in back. On X11 you can restart
-the shell by pressing <kbd>Alt+F2</kbd>, <kbd>r</kbd>, <kbd>Enter</kbd>.
-
-##### Enable extension
-
-Then you can enable the extension using `gnome-tweaks` app, or by running:
-
-    $ make enable
-
-in the repository.
-
-#### `git clone` to `~/.local/share/gnome-shell/extensions`
-
-Or you can `clone` the repository directly into `~/.local/share/gnome-shell/extensions`:
-
-    $ mkdir -p ~/.local/share/gnome-shell/extensions
-    $ cd ~/.local/share/gnome-shell/extensions
-    $ git clone https://github.com/amezin/gnome-shell-extension-ddterm.git ddterm@amezin.github.com
-    $ cd ddterm@amezin.github.com
-    $ make develop
-
-Running `make develop` is still necessary to generate some files.
-
-##### Restart GNOME Shell
-
-After that, restart GNOME Shell - log out, log in back. On X11 you can restart
-the shell by pressing <kbd>Alt+F2</kbd>, <kbd>r</kbd>, <kbd>Enter</kbd>.
-
-##### Enable extension
-
-Then you can enable the extension using `gnome-tweaks` app, or by running:
-
-    $ make enable
-
-in the repository.
+    $ gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell/Extensions/ddterm --method com.github.amezin.ddterm.Extension.Toggle

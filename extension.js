@@ -1,31 +1,84 @@
+/*
+    Copyright © 2020, 2021 Aleksandr Mezin
+
+    This file is part of ddterm GNOME Shell extension.
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 'use strict';
 
-/* exported init enable disable */
+/* exported init enable disable settings toggle window_manager subprocess */
 
-const { GLib, GObject, Gio, Meta, Shell } = imports.gi;
+const { GLib, Gio, Meta, Shell } = imports.gi;
 const ByteArray = imports.byteArray;
 const Main = imports.ui.main;
+
 const Me = imports.misc.extensionUtils.getCurrentExtension();
+const { ConnectionSet } = Me.imports.connectionset;
+const { PanelIconProxy } = Me.imports.panelicon;
+const { WindowManager } = Me.imports.wm;
 
-let settings = null;
-
-let current_window = null;
-
-let bus_watch_id = null;
-let dbus_action_group = null;
-
-let resizing = false;
+var settings = null;
+var window_manager = null;
 
 let wayland_client = null;
-let subprocess = null;
+var subprocess = null;
+
+let panel_icon = null;
+let app_dbus = null;
+
+let connections = null;
+let window_connections = null;
+let dbus_interface = null;
 
 const APP_ID = 'com.github.amezin.ddterm';
+const APP_WMCLASS = 'Com.github.amezin.ddterm';
 const APP_DBUS_PATH = '/com/github/amezin/ddterm';
 const WINDOW_PATH_PREFIX = `${APP_DBUS_PATH}/window/`;
-const SUBPROCESS_ARGV = [Me.dir.get_child('com.github.amezin.ddterm').get_path(), '--undecorated'];
-const IS_WAYLAND_COMPOSITOR = Meta.is_wayland_compositor();
-const USE_WAYLAND_CLIENT = Meta.WaylandClient && IS_WAYLAND_COMPOSITOR;
 const SIGINT = 2;
+
+class AppDBusWatch {
+    constructor() {
+        this.action_group = null;
+
+        this.watch_id = Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            APP_ID,
+            Gio.BusNameWatcherFlags.NONE,
+            this._appeared.bind(this),
+            this._disappeared.bind(this)
+        );
+    }
+
+    _appeared(connection, name) {
+        this.action_group = Gio.DBusActionGroup.get(connection, name, APP_DBUS_PATH);
+    }
+
+    _disappeared() {
+        this.action_group = null;
+    }
+
+    unwatch() {
+        if (this.watch_id) {
+            Gio.bus_unwatch_name(this.watch_id);
+            this.watch_id = null;
+        }
+
+        this.action_group = null;
+    }
+}
 
 class ExtensionDBusInterface {
     constructor() {
@@ -33,50 +86,45 @@ class ExtensionDBusInterface {
         this.dbus = Gio.DBusExportedObject.wrapJSObject(ByteArray.toString(xml), this);
     }
 
-    BeginResize() {
-        if (!current_window || !current_window.maximized_vertically)
-            return;
-
-        const workarea = workarea_for_window(current_window);
-        const target_rect = target_rect_for_workarea(workarea);
-
-        Main.wm.skipNextEffect(current_window.get_compositor_private());
-        current_window.unmaximize(Meta.MaximizeFlags.VERTICAL);
-
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            move_resize_window(current_window, target_rect);
-            return GLib.SOURCE_REMOVE;
-        });
-    }
-}
-
-const DBUS_INTERFACE = new ExtensionDBusInterface().dbus;
-
-class WaylandClientStub {
-    constructor(subprocess_launcher) {
-        this.subprocess_launcher = subprocess_launcher;
+    BeginResizeVertical() {
+        window_manager.unmaximize_for_resize(Meta.MaximizeFlags.VERTICAL);
     }
 
-    spawnv(_display, argv) {
-        return this.subprocess_launcher.spawnv(argv);
+    BeginResizeHorizontal() {
+        window_manager.unmaximize_for_resize(Meta.MaximizeFlags.HORIZONTAL);
     }
 
-    hide_from_window_list(_win) {
+    Toggle() {
+        toggle();
     }
 
-    show_in_window_list(_win) {
+    Activate() {
+        activate();
     }
 
-    owns_window(_win) {
-        return true;
+    GetTargetRect() {
+        /*
+         * Don't want to track mouse pointer continuously, so try to update the
+         * index manually in multiple places. Also, Meta.CursorTracker doesn't
+         * seem to work properly in X11 session.
+         */
+        if (!window_manager.current_window)
+            window_manager.update_monitor_index();
+
+        const r = window_manager.target_rect;
+        return [r.x, r.y, r.width, r.height];
+    }
+
+    get TargetRect() {
+        return this.GetTargetRect();
     }
 }
 
 function init() {
+    imports.misc.extensionUtils.initTranslations();
 }
 
 function enable() {
-    disconnect_settings();
     settings = imports.misc.extensionUtils.getSettings();
 
     Main.wm.addKeybinding(
@@ -86,53 +134,108 @@ function enable() {
         Shell.ActionMode.NORMAL,
         toggle
     );
-
-    stop_dbus_watch();
-    bus_watch_id = Gio.bus_watch_name(
-        Gio.BusType.SESSION,
-        APP_ID,
-        Gio.BusNameWatcherFlags.NONE,
-        dbus_appeared,
-        dbus_disappeared
+    Main.wm.addKeybinding(
+        'ddterm-activate-hotkey',
+        settings,
+        Meta.KeyBindingFlags.NONE,
+        Shell.ActionMode.NORMAL,
+        activate
     );
 
-    disconnect_created_handler();
-    global.display.connect('window-created', handle_created);
+    app_dbus = new AppDBusWatch();
 
-    disconnect_focus_tracking();
-    global.display.connect('notify::focus-window', focus_window_changed);
+    connections = new ConnectionSet();
+    window_connections = new ConnectionSet();
 
-    settings.connect('changed::window-above', set_window_above);
-    settings.connect('changed::window-stick', set_window_stick);
-    settings.connect('changed::window-height', update_window_height);
-    settings.connect('changed::window-skip-taskbar', set_skip_taskbar);
+    connections.connect(global.display, 'window-created', (_, win) => watch_window(win));
+    connections.connect(settings, 'changed::window-skip-taskbar', set_skip_taskbar);
 
-    DBUS_INTERFACE.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/ddterm');
+    window_manager = new WindowManager({ settings });
+
+    connections.connect(window_manager, 'hide-request', () => {
+        if (app_dbus.action_group)
+            app_dbus.action_group.activate_action('hide', null);
+    });
+
+    dbus_interface = new ExtensionDBusInterface();
+    dbus_interface.dbus.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/ddterm');
+
+    panel_icon = new PanelIconProxy();
+    settings.bind('panel-icon-type', panel_icon, 'type', Gio.SettingsBindFlags.GET | Gio.SettingsBindFlags.NO_SENSITIVITY);
+
+    connections.connect(panel_icon, 'toggle', (_, value) => {
+        if (value !== (window_manager.current_window !== null))
+            toggle();
+    });
+
+    connections.connect(panel_icon, 'open-preferences', () => {
+        if (app_dbus.action_group)
+            app_dbus.action_group.activate_action('preferences', null);
+        else
+            imports.misc.extensionUtils.openPrefs();
+    });
+
+    connections.connect(window_manager, 'notify::current-window', () => {
+        panel_icon.active = window_manager.current_window !== null;
+    });
+
+    connections.connect(window_manager, 'notify::target-rect', () => {
+        dbus_interface.dbus.emit_property_changed('TargetRect', new GLib.Variant('(iiii)', dbus_interface.TargetRect));
+        dbus_interface.dbus.flush();
+    });
+
+    Meta.get_window_actors(global.display).forEach(actor => {
+        watch_window(actor.meta_window);
+    });
 }
 
 function disable() {
-    DBUS_INTERFACE.unexport();
+    Main.wm.removeKeybinding('ddterm-toggle-hotkey');
+    Main.wm.removeKeybinding('ddterm-activate-hotkey');
+
+    if (dbus_interface) {
+        dbus_interface.dbus.unexport();
+        dbus_interface = null;
+    }
 
     if (Main.sessionMode.allowExtensions) {
         // Stop the app only if the extension isn't being disabled because of
         // lock screen/switch to other mode where extensions aren't allowed.
         // Because when the session switches back to normal mode we want to
         // keep all open terminals.
-        if (dbus_action_group)
-            dbus_action_group.activate_action('quit', null);
+        if (app_dbus && app_dbus.action_group)
+            app_dbus.action_group.activate_action('quit', null);
         else if (subprocess)
             subprocess.send_signal(SIGINT);
     }
 
-    stop_dbus_watch();
-    dbus_action_group = null;
+    if (app_dbus) {
+        app_dbus.unwatch();
+        app_dbus = null;
+    }
 
-    disconnect_created_handler();
-    disconnect_focus_tracking();
+    if (window_connections) {
+        window_connections.disconnect();
+        window_connections = null;
+    }
 
-    Main.wm.removeKeybinding('ddterm-toggle-hotkey');
+    if (window_manager) {
+        window_manager.disable();
+        window_manager = null;
+    }
 
-    disconnect_settings();
+    if (connections) {
+        connections.disconnect();
+        connections = null;
+    }
+
+    if (panel_icon) {
+        Gio.Settings.unbind(panel_icon, 'type');
+        panel_icon.remove();
+        panel_icon = null;
+    }
+
+    settings = null;
 }
 
 function spawn_app() {
@@ -144,15 +247,36 @@ function spawn_app() {
     const context = global.create_app_launch_context(0, -1);
     subprocess_launcher.set_environ(context.get_environment());
 
-    if (settings.get_boolean('force-x11-gdk-backend'))
-        subprocess_launcher.setenv('GDK_BACKEND', 'x11', true);
+    let argv = [
+        Me.dir.get_child(APP_ID).get_path(),
+        '--undecorated',
+    ];
 
-    if (USE_WAYLAND_CLIENT && subprocess_launcher.getenv('GDK_BACKEND') !== 'x11')
+    if (settings.get_boolean('force-x11-gdk-backend')) {
+        const prev_gdk_backend = subprocess_launcher.getenv('GDK_BACKEND');
+
+        if (prev_gdk_backend === null)
+            argv.push('--unset-gdk-backend');
+        else
+            argv.push('--reset-gdk-backend', prev_gdk_backend);
+
+        subprocess_launcher.setenv('GDK_BACKEND', 'x11', true);
+    }
+
+    if (Meta.WaylandClient &&
+        Meta.is_wayland_compositor() &&
+        subprocess_launcher.getenv('GDK_BACKEND') !== 'x11')
         wayland_client = Meta.WaylandClient.new(subprocess_launcher);
     else
-        wayland_client = new WaylandClientStub(subprocess_launcher);
+        wayland_client = null;
 
-    subprocess = wayland_client.spawnv(global.display, SUBPROCESS_ARGV);
+    printerr(`Starting ddterm app: ${JSON.stringify(argv)}`);
+
+    if (wayland_client)
+        subprocess = wayland_client.spawnv(global.display, argv);
+    else
+        subprocess = subprocess_launcher.spawnv(argv);
+
     subprocess.wait_async(null, subprocess_terminated);
 }
 
@@ -161,242 +285,92 @@ function subprocess_terminated(source) {
         subprocess = null;
         wayland_client = null;
     }
+
+    if (source.get_if_signaled()) {
+        const signum = source.get_term_sig();
+        printerr(`ddterm app killed by signal ${signum} (${GLib.strsignal(signum)})`);
+    } else {
+        printerr(`ddterm app exited with status ${source.get_exit_status()}`);
+    }
 }
 
 function toggle() {
-    if (dbus_action_group)
-        dbus_action_group.activate_action('toggle', null);
+    if (!window_manager.current_window)
+        window_manager.update_monitor_index();
+
+    if (app_dbus.action_group)
+        app_dbus.action_group.activate_action('toggle', null);
     else
         spawn_app();
 }
 
-function dbus_appeared(connection, name) {
-    dbus_action_group = Gio.DBusActionGroup.get(connection, name, APP_DBUS_PATH);
-}
-
-function dbus_disappeared() {
-    dbus_action_group = null;
-}
-
-function handle_created(display, win) {
-    const handler_ids = [
-        win.connect('notify::gtk-application-id', track_window),
-        win.connect('notify::gtk-window-object-path', track_window),
-    ];
-
-    const disconnect = () => {
-        handler_ids.forEach(handler => win.disconnect(handler));
-    };
-
-    handler_ids.push(win.connect('unmanaging', disconnect));
-    handler_ids.push(win.connect('unmanaged', disconnect));
-
-    track_window(win);
-}
-
-function focus_window_changed() {
-    if (!current_window || current_window.is_hidden())
-        return;
-
-    if (!settings || !settings.get_boolean('hide-when-focus-lost'))
-        return;
-
-    const win = global.display.focus_window;
-    if (win !== null) {
-        if (current_window === win || current_window.is_ancestor_of_transient(win))
-            return;
-    }
-
-    if (dbus_action_group)
-        dbus_action_group.activate_action('hide', null);
-}
-
-function is_dropdown_terminal_window(win) {
-    if (!wayland_client) {
-        // On X11, shell can be restarted, and the app will keep running.
-        // Accept windows from previously launched app instances.
-        if (IS_WAYLAND_COMPOSITOR)
-            return false;
-
-    } else if (!wayland_client.owns_window(win)) {
-        return false;
-    }
-
-    return (
-        win.gtk_application_id === APP_ID &&
-        win.gtk_window_object_path &&
-        win.gtk_window_object_path.startsWith(WINDOW_PATH_PREFIX)
-    );
-}
-
-function set_window_above() {
-    if (current_window === null)
-        return;
-
-    if (settings.get_boolean('window-above'))
-        current_window.make_above();
+function activate() {
+    if (window_manager.current_window)
+        Main.activateWindow(window_manager.current_window);
     else
-        current_window.unmake_above();
-}
-
-function set_window_stick() {
-    if (current_window === null)
-        return;
-
-    if (settings.get_boolean('window-stick'))
-        current_window.stick();
-    else
-        current_window.unstick();
+        toggle();
 }
 
 function set_skip_taskbar() {
-    if (!current_window || !wayland_client)
+    if (!wayland_client || !window_manager.current_window)
         return;
 
     if (settings.get_boolean('window-skip-taskbar'))
-        wayland_client.hide_from_window_list(current_window);
+        wayland_client.hide_from_window_list(window_manager.current_window);
     else
-        wayland_client.show_in_window_list(current_window);
+        wayland_client.show_in_window_list(window_manager.current_window);
 }
 
-function track_window(win) {
-    if (!is_dropdown_terminal_window(win)) {
-        untrack_window(win);
-        return;
-    }
+function watch_window(win) {
+    const handler_ids = [];
 
-    if (win === current_window)
-        return;
+    const disconnect = () => {
+        while (handler_ids.length > 0)
+            window_connections.disconnect(win, handler_ids.pop());
+    };
 
-    current_window = win;
+    const check = () => {
+        disconnect();
 
-    win.connect('unmanaging', untrack_window);
-    win.connect('unmanaged', untrack_window);
+        if (wayland_client) {
+            if (!wayland_client.owns_window(win))
+                return;
+        } else if (subprocess) {
+            const pid = win.get_pid();
+            if (pid > 0 && pid.toString() !== subprocess.get_identifier())
+                return;
+        }
 
-    win.connect('notify::maximized-vertically', unmaximize_window);
+        const wm_class = win.wm_class;
+        if (wm_class) {
+            if (wm_class !== APP_WMCLASS && wm_class !== APP_ID)
+                return;
 
-    const workarea = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.currentMonitor.index);
-    const target_rect = target_rect_for_workarea(workarea);
+            const gtk_application_id = win.gtk_application_id;
+            if (gtk_application_id) {
+                if (gtk_application_id !== APP_ID)
+                    return;
 
-    move_resize_window(win, target_rect);
+                const gtk_window_object_path = win.gtk_window_object_path;
+                if (gtk_window_object_path) {
+                    if (gtk_window_object_path.startsWith(WINDOW_PATH_PREFIX)) {
+                        window_manager.manage_window(win);
+                        set_skip_taskbar();
+                    }
 
-    // !!! Sometimes size-changed is emitted from .move_resize_frame() with .get_frame_rect() returning old/incorrect size.
-    // Current workaround - 'resizing' flag
-    win.connect('size-changed', update_height_setting);
+                    return;
+                }
+            }
+        }
 
-    Main.activateWindow(win);
+        handler_ids.push(
+            window_connections.connect(win, 'notify::gtk-application-id', check),
+            window_connections.connect(win, 'notify::gtk-window-object-path', check),
+            window_connections.connect(win, 'notify::wm-class', check),
+            window_connections.connect(win, 'unmanaging', disconnect),
+            window_connections.connect(win, 'unmanaged', disconnect)
+        );
+    };
 
-    set_window_above();
-    set_window_stick();
-    set_skip_taskbar();
-}
-
-function workarea_for_window(win) {
-    // Can't use window.monitor here - it's out of sync
-    const monitor = global.display.get_monitor_index_for_rect(win.get_frame_rect());
-    if (monitor < 0)
-        return null;
-
-    return Main.layoutManager.getWorkAreaForMonitor(monitor);
-}
-
-function target_rect_for_workarea(workarea) {
-    const target_rect = workarea.copy();
-    target_rect.height *= settings.get_double('window-height');
-    return target_rect;
-}
-
-function unmaximize_window(win) {
-    if (!win || win !== current_window)
-        return;
-
-    if (!win.maximized_vertically)
-        return;
-
-    const workarea = workarea_for_window(current_window);
-    const target_rect = target_rect_for_workarea(workarea);
-
-    if (target_rect.height < workarea.height)
-        win.unmaximize(Meta.MaximizeFlags.VERTICAL);
-}
-
-function move_resize_window(win, target_rect) {
-    resizing = true;
-    try {
-        win.move_resize_frame(false, target_rect.x, target_rect.y, target_rect.width, target_rect.height);
-    } finally {
-        resizing = false;
-    }
-}
-
-function update_height_setting(win) {
-    if (resizing)
-        return;
-
-    if (!win || win !== current_window)
-        return;
-
-    if (win.maximized_vertically)
-        return;
-
-    const workarea = workarea_for_window(win);
-    const current_height = win.get_frame_rect().height / workarea.height;
-
-    if (Math.abs(current_height - settings.get_double('window-height')) > 0.0001)
-        settings.set_double('window-height', current_height);
-}
-
-function update_window_height() {
-    if (!current_window)
-        return;
-
-    const workarea = workarea_for_window(current_window);
-    if (!workarea)
-        return;
-
-    const target_rect = target_rect_for_workarea(workarea);
-    if (target_rect.equal(current_window.get_frame_rect()))
-        return;
-
-    if (current_window.maximized_vertically && target_rect.height < workarea.height) {
-        Main.wm.skipNextEffect(current_window.get_compositor_private());
-        current_window.unmaximize(Meta.MaximizeFlags.VERTICAL);
-    }
-
-    move_resize_window(current_window, target_rect);
-}
-
-function untrack_window(win) {
-    if (win === current_window)
-        current_window = null;
-
-    if (win) {
-        GObject.signal_handlers_disconnect_by_func(win, untrack_window);
-        GObject.signal_handlers_disconnect_by_func(win, update_height_setting);
-        GObject.signal_handlers_disconnect_by_func(win, unmaximize_window);
-    }
-}
-
-function stop_dbus_watch() {
-    if (bus_watch_id) {
-        Gio.bus_unwatch_name(bus_watch_id);
-        bus_watch_id = null;
-    }
-}
-
-function disconnect_created_handler() {
-    GObject.signal_handlers_disconnect_by_func(global.display, handle_created);
-}
-
-function disconnect_focus_tracking() {
-    GObject.signal_handlers_disconnect_by_func(global.display, focus_window_changed);
-}
-
-function disconnect_settings() {
-    if (settings) {
-        GObject.signal_handlers_disconnect_by_func(settings, set_window_above);
-        GObject.signal_handlers_disconnect_by_func(settings, set_window_stick);
-        GObject.signal_handlers_disconnect_by_func(settings, update_window_height);
-        GObject.signal_handlers_disconnect_by_func(settings, set_skip_taskbar);
-    }
+    check();
 }

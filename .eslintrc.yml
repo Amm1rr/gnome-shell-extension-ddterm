@@ -12,5 +12,9 @@ rules:
     - error
     - always
   prefer-arrow-callback: error
+  no-multiple-empty-lines:
+    - error
+    - max: 1
+  jsdoc/require-jsdoc: off
 globals:
   global: readonly

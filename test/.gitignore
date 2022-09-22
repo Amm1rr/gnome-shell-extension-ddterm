@@ -1,0 +1,6 @@
+/.pytest_cache/
+/.tox/
+__pycache__/
+/report.html
+/junit.xml
+/assets/

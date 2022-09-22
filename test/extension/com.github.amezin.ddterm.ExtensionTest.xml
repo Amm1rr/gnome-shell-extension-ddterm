@@ -1,0 +1,63 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+    "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+
+<node>
+    <interface name="com.github.amezin.ddterm.ExtensionTest">
+        <method name="Setup"/>
+
+        <method name="GetNMonitors">
+            <arg name="n" type="i" direction="out"/>
+        </method>
+        <method name="GetPrimaryMonitor">
+            <arg name="index" type="i" direction="out"/>
+        </method>
+
+        <method name="LogMessage">
+            <arg name="msg" type="s" direction="in"/>
+        </method>
+
+        <method name="TestShow">
+            <arg name="window_size" type="d" direction="in"/>
+            <arg name="window_maximize" type="s" direction="in"/>
+            <arg name="window_pos" type="s" direction="in"/>
+            <arg name="current_monitor" type="i" direction="in"/>
+            <arg name="window_monitor" type="s" direction="in"/>
+        </method>
+        <method name="TestUnmaximize">
+            <arg name="window_size" type="d" direction="in"/>
+            <arg name="window_maximize" type="s" direction="in"/>
+            <arg name="window_pos" type="s" direction="in"/>
+            <arg name="current_monitor" type="i" direction="in"/>
+            <arg name="window_monitor" type="s" direction="in"/>
+        </method>
+        <method name="TestUnmaximizeCorrectSize">
+            <arg name="window_size" type="d" direction="in"/>
+            <arg name="window_size2" type="d" direction="in"/>
+            <arg name="window_pos" type="s" direction="in"/>
+            <arg name="current_monitor" type="i" direction="in"/>
+            <arg name="window_monitor" type="s" direction="in"/>
+        </method>
+        <method name="TestUnmaximizeOnSizeChange">
+            <arg name="window_size" type="d" direction="in"/>
+            <arg name="window_size2" type="d" direction="in"/>
+            <arg name="window_pos" type="s" direction="in"/>
+            <arg name="current_monitor" type="i" direction="in"/>
+            <arg name="window_monitor" type="s" direction="in"/>
+        </method>
+        <method name="TestResizeXte">
+            <arg name="window_size" type="d" direction="in"/>
+            <arg name="window_maximize" type="s" direction="in"/>
+            <arg name="window_size2" type="d" direction="in"/>
+            <arg name="window_pos" type="s" direction="in"/>
+            <arg name="current_monitor" type="i" direction="in"/>
+            <arg name="window_monitor" type="s" direction="in"/>
+        </method>
+        <method name="TestChangePosition">
+            <arg name="window_size" type="d" direction="in"/>
+            <arg name="window_pos" type="s" direction="in"/>
+            <arg name="window_pos2" type="s" direction="in"/>
+            <arg name="current_monitor" type="i" direction="in"/>
+            <arg name="window_monitor" type="s" direction="in"/>
+        </method>
+    </interface>
+</node>

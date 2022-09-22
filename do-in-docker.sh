@@ -1,11 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+SCRIPT_DIR=$(CDPATH="" cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+
+TTY_FLAG=$(test -t 0 && echo -n -t)
+UID_GID=$(id -u):$(id -g)
 
 set -ex
 
-TTY_FLAG=-t
-
-if [ ! -t 0 ]; then
-    TTY_FLAG=
-fi
-
-exec docker run --rm -i $TTY_FLAG -u $(id -u):$(id -g) -v "${PWD}:${PWD}" -w "${PWD}" ghcr.io/amezin/gnome-shell-extension-ddterm-ci-docker-image:master xvfb-run "$@"
+exec docker run --init --rm -i $TTY_FLAG -u $UID_GID -v "${SCRIPT_DIR}:${SCRIPT_DIR}" -w "${PWD}" ghcr.io/ddterm/ci-docker-image:latest xvfb-run "$@"

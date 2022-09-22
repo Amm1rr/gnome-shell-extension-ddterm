@@ -1,0 +1,143 @@
+concurrency: ${{ github.workflow }}/${{ github.ref }}
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ddterm/ci-docker-image:2022.09.12.1
+
+    steps:
+    - id: checkout
+      uses: actions/checkout@v3
+
+    - run: git config --global --replace-all safe.directory "$GITHUB_WORKSPACE"
+
+    - uses: actions/setup-node@v3
+
+    - run: npm ci
+
+    - run: make lint
+
+    - run: echo "::add-matcher::.github/problem-matchers/generic.json"
+      if: ${{ always() && steps.checkout.conclusion == 'success' }}
+
+    - run: make schemas
+      if: ${{ always() && steps.checkout.conclusion == 'success' }}
+
+    - run: make locales
+      if: ${{ always() && steps.checkout.conclusion == 'success' }}
+
+    - run: xvfb-run make gtk-builder-validate
+      if: ${{ always() && steps.checkout.conclusion == 'success' }}
+
+    - run: make msgcmp
+      if: ${{ always() && steps.checkout.conclusion == 'success' }}
+
+    - run: |
+        tox --sitepackages -e pip-compile
+        git diff --exit-code --color=always
+      if: ${{ always() && steps.checkout.conclusion == 'success' }}
+      working-directory: test
+
+  pack:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ddterm/ci-docker-image:2022.09.12.1
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-node@v3
+    - run: echo "::add-matcher::.github/problem-matchers/generic.json"
+    - run: npm ci
+    - run: xvfb-run make pack
+    - id: upload
+      uses: actions/upload-artifact@v3
+      with:
+        name: pack
+        path: "*.shell-extension.zip"
+        if-no-files-found: error
+
+  configure-test-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.generate.outputs.images }}
+    steps:
+      - uses: actions/checkout@v3
+      - id: generate
+        run: |
+          import json
+          import os.path
+          names = [os.path.splitext(dockerfile)[0] for dockerfile in os.listdir()]
+          print(f'::set-output name=images::{json.dumps(names)}')
+        shell: python
+        working-directory: test/images
+
+  test:
+    needs:
+    - lint
+    - pack
+    - configure-test-matrix
+
+    runs-on: ubuntu-22.04
+    container:
+      image: ghcr.io/ddterm/ci-docker-image:2022.09.12.1
+      options: --privileged --cgroupns=host --tmpfs /tmp --tmpfs /run
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJson(needs.configure-test-matrix.outputs.images) }}
+
+    env:
+      PY_COLORS: 1
+      TOX_TESTENV_PASSENV: PY_COLORS GITHUB_ACTIONS PIP_DISABLE_PIP_VERSION_CHECK
+      TOXENV: py3-ghactions
+      PIP_DISABLE_PIP_VERSION_CHECK: 1
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-node@v3
+    - run: echo "::add-matcher::.github/problem-matchers/generic.json"
+    - run: git config --global --replace-all safe.directory "$GITHUB_WORKSPACE"
+    - id: setup_testspace
+      uses: testspace-com/setup-testspace@v1
+      with:
+        domain: ${{ github.repository_owner }}
+      continue-on-error: true
+    - uses: actions/download-artifact@v3
+      with:
+        name: pack
+    - run: tox -vv --notest --sitepackages
+      working-directory: test
+    - run: >-
+        for retry in 1 2 3;
+        do
+          podman build --pull -f ${{ matrix.image }}.dockerfile && break;
+        done
+      working-directory: test/images
+    - run: |
+        echo "::remove-matcher owner=generic::"
+        echo "::remove-matcher owner=generic-nolocation::"
+    - run: >-
+        tox --sitepackages --
+        --self-contained-html
+        --junitxml=junit.xml
+        --dockerfile images/${{ matrix.image }}.dockerfile
+        --pack ../*.shell-extension.zip
+        -n auto
+        --screenshot-failing-only
+        -v
+      working-directory: test
+    - run: testspace --verbose "[${{ matrix.image }}]./test/junit.xml" "[${{ matrix.image }}]+./test/report.html"
+      if: ${{ always() && steps.setup_testspace.outcome == 'success' }}
+    - uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.image }}
+        path: |
+          test/report.html
+          test/junit.xml
+      if: always()

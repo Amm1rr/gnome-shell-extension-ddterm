@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<interface>
+<!-- 
+Copyright © 2020, 2021 Aleksandr Mezin
+
+This file is part of ddterm GNOME Shell extension.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-->
+<interface domain="ddterm@amezin.github.com">
   <!-- interface-requires gtk+ 3.0 -->
   <menu id="terminal-popup">
     <section>
@@ -39,6 +57,12 @@
     </section>
     <section>
       <item>
+        <attribute name="label" translatable="yes">Find</attribute>
+        <attribute name="action">terminal.find</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
         <attribute name="label" translatable="yes">Reset</attribute>
         <attribute name="action">terminal.reset</attribute>
       </item>
@@ -54,10 +78,25 @@
       </item>
     </section>
     <section>
-      <item>
+      <submenu>
         <attribute name="label" translatable="yes">New Tab</attribute>
-        <attribute name="action">win.new-tab</attribute>
-      </item>
+        <item>
+          <attribute name="label" translatable="yes">New Tab Before Current Tab</attribute>
+          <attribute name="action">win.new-tab-before-current</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes">New Tab After Current Tab</attribute>
+          <attribute name="action">win.new-tab-after-current</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes">New Tab Before First Tab</attribute>
+          <attribute name="action">win.new-tab-front</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes">New Tab After Last Tab</attribute>
+          <attribute name="action">win.new-tab</attribute>
+        </item>
+      </submenu>
     </section>
     <submenu>
       <attribute name="label" translatable="yes">Preferences</attribute>
@@ -77,6 +116,16 @@
           <attribute name="action">app.window-stick</attribute>
         </item>
         <item>
+          <attribute name="label" translatable="yes">Maximize Window</attribute>
+          <attribute name="action">app.window-maximize</attribute>
+        </item>
+        <item>
+          <attribute name="label" translatable="yes">Transparent Background</attribute>
+          <attribute name="action">app.transparent-background</attribute>
+        </item>
+      </section>
+      <section>
+        <item>
           <attribute name="label" translatable="yes">Hide When Application Loses Focus</attribute>
           <attribute name="action">app.hide-when-focus-lost</attribute>
         </item>
@@ -93,6 +142,12 @@
         <item>
           <attribute name="label" translatable="yes">Scroll On Keystroke</attribute>
           <attribute name="action">app.scroll-on-keystroke</attribute>
+        </item>
+      </section>
+      <section>
+        <item>
+          <attribute name="label" translatable="yes">Preserve Working Directory In New Tabs</attribute>
+          <attribute name="action">app.preserve-working-directory</attribute>
         </item>
       </section>
       <section>
@@ -120,10 +175,34 @@
       <attribute name="label" translatable="yes">Close</attribute>
       <attribute name="action">page.close</attribute>
     </item>
-    <item>
-      <attribute name="label" translatable="yes">New Tab</attribute>
-      <attribute name="action">win.new-tab</attribute>
-    </item>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">New Tab Before This Tab</attribute>
+        <attribute name="action">page.new-tab-before</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">New Tab After This Tab</attribute>
+        <attribute name="action">page.new-tab-after</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">New Tab Before First Tab</attribute>
+        <attribute name="action">win.new-tab-front</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">New Tab After Last Tab</attribute>
+        <attribute name="action">win.new-tab</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Move Tab to Previous Position</attribute>
+        <attribute name="action">win.move-tab-prev</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Move Tab to Next Position</attribute>
+        <attribute name="action">win.move-tab-next</attribute>
+      </item>
+    </section>
     <item>
       <attribute name="label" translatable="yes">Preferences...</attribute>
       <attribute name="action">app.preferences</attribute>

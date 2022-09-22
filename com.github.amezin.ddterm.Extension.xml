@@ -3,6 +3,17 @@
 
 <node>
     <interface name="com.github.amezin.ddterm.Extension">
-        <method name="BeginResize"/>
+        <method name="BeginResizeHorizontal"/>
+        <method name="BeginResizeVertical"/>
+        <method name="Toggle"/>
+        <method name="Activate"/>
+        <method name="GetTargetRect">
+            <arg type="i" name="x" direction="out"/>
+            <arg type="i" name="y" direction="out"/>
+            <arg type="i" name="width" direction="out"/>
+            <arg type="i" name="height" direction="out"/>
+        </method>
+
+        <property type="(iiii)" name="TargetRect" access="read"/>
     </interface>
 </node>

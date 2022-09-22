@@ -1,0 +1,26 @@
+name: release
+
+on:
+  push:
+    tags:
+      - v*
+
+jobs:
+  ci:
+    uses: ./.github/workflows/common.yml
+
+  draft:
+    needs: ci
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v3
+      with:
+        name: pack
+    - uses: softprops/action-gh-release@v1
+      with:
+        files: "*.shell-extension.zip"
+        draft: true
+        generate_release_notes: true
